@@ -7,9 +7,9 @@ from logging import getLogger
 from loris_exception import ResolverException
 from os.path import join, exists
 from os import makedirs
-from os.path import dirname
+from os.path import dirname, isdir
 from shutil import copy
-from urllib import unquote, quote_plus
+from urllib import unquote, unquote_plus, quote_plus
 from contextlib import closing
 
 import constants
@@ -102,6 +102,104 @@ class SimpleFSResolver(_AbstractResolver):
         logger.debug('src format %s' % (format,))
 
         return (source_fp, format)
+
+class DigLitResolver(_AbstractResolver):
+    """
+    Resolves digLit file paths. Identifiers have the format 
+    'projectname'/'filename'; different image quality options (1-4, best is 4)
+    might be available.
+    
+    Root image directories must be listed in the config file.
+    """
+    def __init__(self, config):
+        super(DigLitResolver, self).__init__(config)
+        self.img_dirs = self.config['src_img_dirs']
+        self.ident_format = re.compile("^[A-Za-z0-9\-\_\(\)\.]+/[A-Za-z0-9\-\_\. ]+$")
+        self.no_iiif = self.config['no_iiif']
+
+    @staticmethod
+    def _split_ident(ident):
+        return ident.split('/')
+
+    @staticmethod
+    def _normalize(path):
+        # Need to replace '+' with a blank in order for this to work with the 
+        # Mirador viewer
+        return unquote_plus(path).replace('+', ' ')
+
+    def _is_valid(self, ident):
+        if not self.ident_format.match(ident):
+            return 0
+        if ".." in ident:
+            return 0
+        return 1
+
+    def _iter_paths(self, pn, fn):
+        # Generate diglit paths
+        for img_d in self.img_dirs:
+            # Check first, if project directory exists
+            pp = join(img_d, 'image', pn)
+            if exists(pp):
+                # Look for files in decreasing order of quality
+                for qual in ['4', '3', '2', '1']:
+                    yield join(img_d, 'image', pn, qual, fn)
+
+    def is_resolvable(self, ident):
+        ident = self._normalize(ident)
+        logger.debug('resolve ident %s' % (ident,))
+
+        if not self._is_valid(ident):
+            return 0
+        pn, fn = self._split_ident(ident)
+        logger.debug('project name %s' % (pn,))
+        logger.debug('file name %s' % (fn,))
+
+        for fp in self._iter_paths(pn, fn):
+            logger.debug('checking path %s (%s)' % (fp,str(exists(fp)),))
+            if exists(fp):
+                    return 1
+        return 0
+
+    @staticmethod
+    def _format_from_ident(ident):
+        return ident.split('.')[-1]
+
+    def resolve(self, ident):
+        ident = self._normalize(ident)
+
+        if not self._is_valid(ident):
+            public_message = 'Source image not found for identifier: %s.' % (ident,)
+            log_message = 'Invalid identifier: %s.' % (ident,)
+            logger.warn(log_message)
+            raise ResolverException(404, public_message)
+
+        pn, fn = self._split_ident(ident)
+
+        if isdir(self.no_iiif):
+            if pn in listdir(self.no_iiif):
+                logger.debug('Project %s is blocked.' % (pn,))
+                public_message = 'Source image not available.'
+                raise NoIIIFException(403, public_message)
+
+        location = None
+        for fp in self._iter_paths(pn, fn):
+            logger.debug('checking path %s' %(fp))
+            if exists(fp):
+                location = fp
+                break
+
+        if not location:
+            public_message = 'Source image not found for identifier: %s.' % (ident,)
+            log_message = 'Source image not found for identifier: %s.' % (ident,)
+            logger.warn(log_message)
+            raise ResolverException(404, public_message)
+
+        logger.debug('src image: %s' % (location,))
+
+        format = self._format_from_ident(ident)
+        logger.debug('src format %s' % (format,))
+
+        return (location, format)
 
 
 # To use this the resolver stanza of the config will have to have both the
